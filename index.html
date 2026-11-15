@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SPHEREx Sky Viewer</title>
+<style>
+  [hidden] { display:none !important; }
+  body { font-family: system-ui, sans-serif; background:#0b0f1a; color:#e8ecf5; margin:0; padding:16px; }
+  h1 { font-size:20px; margin:0 0 12px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:10px; align-items:end; }
+  label { display:flex; flex-direction:column; font-size:12px; color:#9aa6c0; gap:3px; }
+  label.inline { flex-direction:row; align-items:center; gap:6px; }
+  input, select, button { background:#18203a; color:#e8ecf5; border:1px solid #33406a; border-radius:6px; padding:7px 9px; font-size:14px; }
+  button { cursor:pointer; } button:hover { background:#26325a; }
+  #go { background:#2f5bd8; border-color:#2f5bd8; }
+  #stage { max-width:520px; }
+  #wrap { position:relative; }
+  #frame { width:100%; aspect-ratio:1/1; background:#000; image-rendering:pixelated; border:1px solid #33406a; display:block; }
+  #marker { position:absolute; width:16%; aspect-ratio:1/1; border:2px solid #ffd54a; border-radius:50%;
+            transform:translate(-50%,-50%); pointer-events:none; box-sizing:border-box; }
+  #info { font-size:13px; color:#9aa6c0; margin:6px 0; min-height:18px; }
+  #status { margin:8px 0; font-size:14px; }
+  .err { color:#ff8a8a; }
+  .quick button { font-size:12px; padding:4px 8px; }
+  input[type=range] { padding:0; width:100%; }
+  #note { font-size:12px; color:#9aa6c0; line-height:1.5; }
+</style>
+</head>
+<body>
+<h1>SPHEREx Sky Viewer</h1>
+
+<div class="row">
+  <label>Name (optional)<input id="name" placeholder="Barnard's Star" size="18"></label>
+  <label>RA (deg or 08h55m10.8s)<input id="ra" size="16"></label>
+  <label>Dec (deg or -7d14m42s)<input id="dec" size="16"></label>
+  <label>Field of view
+    <select id="size">
+      <option value="0.03">small (0.03&deg;)</option>
+      <option value="0.05" selected>medium (0.05&deg;)</option>
+      <option value="0.1">large (0.1&deg;)</option>
+    </select>
+  </label>
+  <label>Detector
+    <select id="band">
+      <option>SPHEREx-D1</option><option selected>SPHEREx-D2</option><option>SPHEREx-D3</option>
+      <option>SPHEREx-D4</option><option>SPHEREx-D5</option><option>SPHEREx-D6</option>
+    </select>
+  </label>
+  <button id="go">Go</button>
+</div>
+
+<div class="row">
+  <label>View
+    <select id="mode">
+      <option value="normal" selected>Normal</option>
+      <option value="subtract">Subtract average (shows movers)</option>
+    </select>
+  </label>
+  <label>Stack frames
+    <select id="stack">
+      <option value="1" selected>No stacking</option>
+      <option value="2">Every 2</option>
+      <option value="3">Every 3</option>
+      <option value="5">Every 5</option>
+      <option value="8">Every 8</option>
+    </select>
+  </label>
+  <label class="inline"><input type="checkbox" id="showmark" checked> Show target circle</label>
+</div>
+
+<div class="row quick">
+  <span style="font-size:12px;color:#9aa6c0">Try:</span>
+  <button data-name="Barnard's Star">Barnard's Star</button>
+  <button data-ra="08h55m10.831s" data-dec="-7d14m42.53s">WISE 0855</button>
+  <button data-name="eps Indi">Epsilon Indi</button>
+  <button data-name="RW Aur">RW Aurigae</button>
+  <button data-name="R Dra">R Draconis</button>
+</div>
+
+<div id="status"></div>
+
+<div id="stage" hidden>
+  <div id="wrap">
+    <img id="frame" alt="SPHEREx sky patch">
+    <div id="marker" hidden></div>
+  </div>
+  <div id="info"></div>
+  <input type="range" id="scrub" min="0" max="0" value="0">
+  <div class="row" style="margin-top:8px">
+    <button id="prev">&#9664; Back</button>
+    <button id="play">Pause</button>
+    <button id="next">Next &#9654;</button>
+    <label>Speed<input type="range" id="speed" min="1" max="10" value="4"></label>
+  </div>
+  <div id="note"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let frames = [], idx = 0, timer = null, playing = true, loaded = false;
+
+function wlText(f) {
+  const w = f.wl_min === f.wl_max ? `${f.wl_min} \u00b5m` : `${f.wl_min}\u2013${f.wl_max} \u00b5m`;
+  return f.n > 1 ? `${w} (stack of ${f.n})` : w;
+}
+function show(i) {
+  if (!frames.length) return;
+  idx = (i + frames.length) % frames.length;
+  const f = frames[idx];
+  $("frame").src = f.png;
+  $("scrub").value = idx;
+  $("info").textContent = `Frame ${idx + 1}/${frames.length}  |  ${f.date} (MJD ${f.mjd.toFixed(2)})  |  ${wlText(f)}`;
+  const m = $("marker");
+  const inside = f.mx != null && f.mx >= 0 && f.mx <= 1 && f.my >= 0 && f.my <= 1;
+  if ($("showmark").checked && inside) {
+    m.style.left = (f.mx * 100) + "%";
+    m.style.top = (f.my * 100) + "%";
+    m.hidden = false;
+  } else { m.hidden = true; }
+}
+function restart() {
+  clearInterval(timer);
+  if (playing && frames.length > 1) {
+    timer = setInterval(() => show(idx + 1), 1100 - $("speed").value * 100);
+  }
+  $("play").textContent = playing ? "Pause" : "Play";
+}
+function setStatus(msg, isErr) {
+  $("status").textContent = msg;
+  $("status").className = isErr ? "err" : "";
+}
+
+async function load() {
+  const p = new URLSearchParams();
+  const name = $("name").value.trim();
+  if (name) p.set("name", name);
+  else {
+    if (!$("ra").value.trim() || !$("dec").value.trim()) { setStatus("Type a name, or both RA and Dec.", true); return; }
+    p.set("ra", $("ra").value.trim()); p.set("dec", $("dec").value.trim());
+  }
+  p.set("size", $("size").value);
+  p.set("band", $("band").value);
+  p.set("mode", $("mode").value);
+  p.set("stack", $("stack").value);
+  history.replaceState(null, "", "?" + p.toString());   // so the link can be shared
+  setStatus("Loading... the first search can take 30-60 seconds.");
+  clearInterval(timer);
+  try {
+    const r = await fetch("/api/frames?" + p.toString());
+    const data = await r.json();
+    if (!r.ok) { setStatus("Error: " + data.error, true); return; }
+    frames = data.frames;
+    if (!frames.length) { $("stage").hidden = true; setStatus("No images found here for this detector. Try another detector.", true); return; }
+    $("scrub").max = frames.length - 1;
+    const notes = [];
+    notes.push(data.aligned
+      ? "Frames are lined up on the sky: stars stay still, movers shift."
+      : "Frames are NOT fully lined up (is 'reproject' installed?), so stars may rotate a little.");
+    if ($("mode").value === "subtract") notes.push("Gray = no change. Bright or dark spots = something that is not in the average image, like a mover.");
+    if ($("stack").value !== "1") notes.push("Stacked frames mix different wavelengths, so brightness can change between frames.");
+    (data.notes || []).forEach(n => notes.push(n));
+    $("note").innerHTML = notes.map(n => "&bull; " + n).join("<br>");
+    setStatus(`RA ${data.ra.toFixed(5)}\u00b0, Dec ${data.dec.toFixed(5)}\u00b0 - ${frames.length} frames`);
+    $("stage").hidden = false;
+    loaded = true; playing = true; show(0); restart();
+  } catch (e) {
+    setStatus("Could not reach the server: " + e, true);
+  }
+}
+
+$("go").onclick = load;
+$("mode").onchange = () => { if (loaded) load(); };
+$("stack").onchange = () => { if (loaded) load(); };
+$("showmark").onchange = () => show(idx);
+$("prev").onclick = () => { playing = false; restart(); show(idx - 1); };
+$("next").onclick = () => { playing = false; restart(); show(idx + 1); };
+$("play").onclick = () => { playing = !playing; restart(); };
+$("speed").oninput = restart;
+$("scrub").oninput = e => { playing = false; restart(); show(+e.target.value); };
+document.querySelectorAll(".quick button").forEach(b => b.onclick = () => {
+  $("name").value = b.dataset.name || "";
+  $("ra").value = b.dataset.ra || ""; $("dec").value = b.dataset.dec || "";
+  load();
+});
+
+// open from a link like /?ra=...&dec=...&size=0.05&mode=subtract
+const q = new URLSearchParams(location.search);
+["name", "ra", "dec", "size", "band", "mode", "stack"].forEach(k => { if (q.get(k)) $(k).value = q.get(k); });
+if (q.get("name") || (q.get("ra") && q.get("dec"))) load();
+</script>
+</body>
+</html>
